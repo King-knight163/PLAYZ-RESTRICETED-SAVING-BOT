@@ -53,7 +53,7 @@ async def get_user_statistics():
     
     return stats
 
-@Client.on_message(filters.command("broadcast") & filters.user([123456789]) & filters.reply)  # Add your admin IDs
+@Client.on_message(filters.command("broadcast") & filters.user([7107162691]) & filters.reply)  # Add your admin IDs
 async def advanced_broadcast(bot, message):
     """Enhanced broadcast command with confirmation and detailed stats"""
     b_msg = message.reply_to_message
