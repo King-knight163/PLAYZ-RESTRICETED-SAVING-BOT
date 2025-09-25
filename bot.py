@@ -3,7 +3,9 @@
 # Ask Doubt on telegram @KingVJ01
 
 from pyrogram import Client
+from pyrogram.errors import FloodWait
 from config import API_ID, API_HASH, BOT_TOKEN
+import asyncio
 
 class Bot(Client):
 
@@ -18,18 +20,22 @@ class Bot(Client):
             sleep_threshold=10
         )
 
-      
     async def start(self):
-            
-        await super().start()
-        print('Bot Started Powered By @VJ_Botz')
+        try:
+            await super().start()
+            me = await self.get_me()
+            print(f'✅ Bot Started Successfully! @{me.username}')
+            print('🚀 Powered By @VJ_Botz')
+        except FloodWait as e:
+            print(f'⚠️ FloodWait Error: Waiting {e.value} seconds...')
+            await asyncio.sleep(e.value)
+            await self.start()
+        except Exception as e:
+            print(f'❌ Error starting bot: {e}')
 
     async def stop(self, *args):
-
         await super().stop()
-        print('Bot Stopped Bye')
-
-Bot().run()
+        print('🛑 Bot Stopped - Bye!')
 
 # Don't Remove Credit Tg - @VJ_Botz
 # Subscribe YouTube Channel For Amazing Bot https://youtube.com/@Tech_VJ
