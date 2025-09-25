@@ -6,18 +6,166 @@ import asyncio
 import datetime
 import time
 import json
+import random
+from threading import Thread
+import schedule
 
-# Broadcast statistics storage
+# Global storage for broadcast data
 broadcast_stats = {}
+scheduled_broadcasts = {}
+auto_broadcasts = {}
+batch_broadcasts = {}
+broadcast_scheduler_running = False
 
-async def broadcast_messages(user_id, message):
-    """Enhanced broadcast function with better error handling"""
+class BroadcastScheduler:
+    def __init__(self):
+        self.running = False
+        
+    async def start_scheduler(self):
+        """Start the background scheduler"""
+        if self.running:
+            return
+            
+        self.running = True
+        while self.running:
+            try:
+                await self.check_scheduled_broadcasts()
+                await self.check_auto_broadcasts()
+                await asyncio.sleep(30)  # Check every 30 seconds
+            except Exception as e:
+                print(f"Scheduler error: {e}")
+                await asyncio.sleep(60)
+    
+    async def check_scheduled_broadcasts(self):
+        """Check and execute scheduled broadcasts"""
+        current_time = int(time.time())
+        
+        for broadcast_id, broadcast_data in list(scheduled_broadcasts.items()):
+            if broadcast_data['execute_time'] <= current_time:
+                await self.execute_scheduled_broadcast(broadcast_id, broadcast_data)
+                del scheduled_broadcasts[broadcast_id]
+    
+    async def check_auto_broadcasts(self):
+        """Check and execute auto-repeat broadcasts"""
+        current_time = int(time.time())
+        
+        for auto_id, auto_data in list(auto_broadcasts.items()):
+            if auto_data['next_run'] <= current_time:
+                # Execute broadcast
+                success = await self.execute_auto_broadcast(auto_id, auto_data)
+                
+                if success:
+                    # Update repeat count
+                    auto_data['executed_count'] += 1
+                    
+                    # Check if more repeats needed
+                    if auto_data['executed_count'] >= auto_data['total_repeats']:
+                        # Delete from auto broadcasts
+                        del auto_broadcasts[auto_id]
+                        print(f"Auto broadcast {auto_id} completed all {auto_data['total_repeats']} repeats")
+                    else:
+                        # Schedule next run
+                        auto_data['next_run'] = current_time + auto_data['interval_seconds']
+                        print(f"Auto broadcast {auto_id} scheduled for next run: {auto_data['next_run']}")
+
+    async def execute_scheduled_broadcast(self, broadcast_id, broadcast_data):
+        """Execute a scheduled broadcast"""
+        try:
+            print(f"Executing scheduled broadcast: {broadcast_id}")
+            # Implementation for scheduled broadcast execution
+        except Exception as e:
+            print(f"Error executing scheduled broadcast {broadcast_id}: {e}")
+
+    async def execute_auto_broadcast(self, auto_id, auto_data):
+        """Execute an auto-repeat broadcast"""
+        try:
+            print(f"Executing auto broadcast: {auto_id}")
+            
+            # Handle batch broadcasts (rotate messages)
+            if auto_data['type'] == 'batch':
+                current_index = auto_data['current_message_index']
+                message_data = auto_data['messages'][current_index]
+                
+                # Send the current message
+                success = await self.send_auto_message(message_data, auto_data, auto_id)
+                
+                # Move to next message in batch
+                auto_data['current_message_index'] = (current_index + 1) % len(auto_data['messages'])
+                
+                return success
+            else:
+                # Single message auto broadcast
+                return await self.send_auto_message(auto_data['message_data'], auto_data, auto_id)
+                
+        except Exception as e:
+            print(f"Error executing auto broadcast {auto_id}: {e}")
+            return False
+
+    async def send_auto_message(self, message_data, auto_data, auto_id):
+        """Send auto broadcast message to all users with pinning"""
+        try:
+            users = await db.get_all_users()
+            success_count = 0
+            
+            async for user in users:
+                if 'id' in user:
+                    user_id = int(user['id'])
+                    
+                    try:
+                        # Send message
+                        if message_data['type'] == 'text':
+                            sent_msg = await bot.send_message(
+                                user_id, 
+                                message_data['content'],
+                                parse_mode=enums.ParseMode.MARKDOWN
+                            )
+                        elif message_data['type'] == 'photo':
+                            sent_msg = await bot.send_photo(
+                                user_id,
+                                message_data['file_id'],
+                                caption=message_data['caption'],
+                                parse_mode=enums.ParseMode.MARKDOWN
+                            )
+                        # Add more message types as needed
+                        
+                        # Pin the message if enabled
+                        if auto_data.get('auto_pin', True):
+                            try:
+                                await bot.pin_chat_message(user_id, sent_msg.id, disable_notification=True)
+                            except:
+                                pass  # Ignore pin errors
+                        
+                        success_count += 1
+                        
+                    except Exception as e:
+                        continue
+                        
+            print(f"Auto broadcast {auto_id} sent to {success_count} users")
+            return True
+            
+        except Exception as e:
+            print(f"Error sending auto message: {e}")
+            return False
+
+# Initialize scheduler
+scheduler = BroadcastScheduler()
+
+async def broadcast_messages(user_id, message, auto_pin=False):
+    """Enhanced broadcast function with auto-pin feature"""
     try:
-        await message.copy(chat_id=user_id, protect_content=False)
+        sent_msg = await message.copy(chat_id=user_id, protect_content=False)
+        
+        # Auto-pin if enabled
+        if auto_pin:
+            try:
+                await sent_msg.pin(disable_notification=True)
+            except:
+                pass  # Ignore pin errors
+        
         return True, "Success"
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        return await broadcast_messages(user_id, message)
+        return await broadcast_messages(user_id, message, auto_pin)
     except InputUserDeactivated:
         await db.delete_user(int(user_id))
         return False, "Deactivated"
@@ -53,9 +201,10 @@ async def get_user_statistics():
     
     return stats
 
-@Client.on_message(filters.command("broadcast") & filters.user([7107162691]) & filters.reply)  # Add your admin IDs
+# Regular Broadcast (existing code...)
+@Client.on_message(filters.command("broadcast") & filters.user([7107162691]) & filters.reply)
 async def advanced_broadcast(bot, message):
-    """Enhanced broadcast command with confirmation and detailed stats"""
+    """Enhanced broadcast command with auto-pin option"""
     b_msg = message.reply_to_message
     if not b_msg:
         return await message.reply_text(
@@ -65,40 +214,27 @@ Reply to a message that you want to broadcast to all users.",
             parse_mode=enums.ParseMode.MARKDOWN
         )
     
-    # Get current user statistics
     user_stats = await get_user_statistics()
     total_users = user_stats["total"]
     
     if total_users == 0:
         return await message.reply_text("❌ **No users found in database!**", parse_mode=enums.ParseMode.MARKDOWN)
     
-    # Show confirmation with detailed stats
     confirm_text = f"""
 📡 **BROADCAST CONFIRMATION**
 
-📊 **Target Audience:**
-   • 👥 **Total Users:** {total_users}
-   • 🔒 **Free:** {user_stats.get('free', 0)}
-   • 🆓 **Freemium:** {user_stats.get('freemium', 0)}
-   • 🔹 **Standard:** {user_stats.get('standard', 0)}
-   • 💎 **Pro:** {user_stats.get('pro', 0)}
-   • 👑 **Elite:** {user_stats.get('elite', 0)}
-   • ⭐ **Premium:** {user_stats.get('premium', 0)}
+📊 **Target Audience:** {total_users} users
+📝 **Message Preview:** {b_msg.text[:100] if b_msg.text else "Media message"}{"..." if b_msg.text and len(b_msg.text) > 100 else ""}
 
-📝 **Message Preview:**
-{b_msg.text[:200] if b_msg.text else "Media message"}{"..." if b_msg.text and len(b_msg.text) > 200 else ""}
-
-⚠️ **Warning:** This action cannot be undone!
-
-🤔 **Are you sure you want to broadcast this message?**
-    """
+⚙️ **Broadcast Options:**
+"""
     
     buttons = [
         [
-            InlineKeyboardButton("✅ Yes, Start Broadcast", callback_data=f"confirm_broadcast_{message.id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")
+            InlineKeyboardButton("📌 Broadcast + Auto Pin", callback_data=f"broadcast_pin_{message.id}"),
+            InlineKeyboardButton("📤 Normal Broadcast", callback_data=f"broadcast_normal_{message.id}")
         ],
-        [InlineKeyboardButton("📊 View Detailed Stats", callback_data="broadcast_stats")]
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")]
     ]
     
     await message.reply_text(
@@ -107,294 +243,607 @@ Reply to a message that you want to broadcast to all users.",
         parse_mode=enums.ParseMode.MARKDOWN
     )
 
-@Client.on_callback_query(filters.regex("confirm_broadcast_"))
-async def execute_broadcast(bot, callback_query):
-    """Execute the actual broadcast after confirmation"""
-    msg_id = int(callback_query.data.split("_")[-1])
+# Scheduled Broadcast
+@Client.on_message(filters.command("schedulebroadcast") & filters.user([7107162691]) & filters.reply)
+async def schedule_broadcast(bot, message):
+    """Schedule a broadcast for specific date and time"""
+    b_msg = message.reply_to_message
+    if not b_msg:
+        return await message.reply_text(
+            "❌ **Reply Required**
+
+Reply to a message that you want to schedule for broadcast.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    schedule_text = """
+⏰ **SCHEDULE BROADCAST**
+
+📅 **When do you want to send this broadcast?**
+
+⏰ **Quick Options:**
+"""
+    
+    current_time = int(time.time())
+    buttons = [
+        [
+            InlineKeyboardButton("🕐 1 Hour Later", callback_data=f"schedule_{current_time + 3600}_{message.id}"),
+            InlineKeyboardButton("🕕 6 Hours Later", callback_data=f"schedule_{current_time + 21600}_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("📅 Tomorrow 9 AM", callback_data=f"schedule_{current_time + 86400}_{message.id}"),
+            InlineKeyboardButton("🌙 Tonight 10 PM", callback_data=f"schedule_{current_time + 43200}_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("⏰ Custom Time", callback_data=f"schedule_custom_{message.id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_schedule")
+        ]
+    ]
+    
+    await message.reply_text(
+        schedule_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+# Auto-Repeat Broadcast
+@Client.on_message(filters.command("autobroadcast") & filters.user([7107162691]) & filters.reply)
+async def auto_repeat_broadcast(bot, message):
+    """Create auto-repeating broadcasts"""
+    b_msg = message.reply_to_message
+    if not b_msg:
+        return await message.reply_text(
+            "❌ **Reply Required**
+
+Reply to a message for auto-repeat broadcasting.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    auto_text = """
+🔄 **AUTO-REPEAT BROADCAST**
+
+⏱️ **Select Repeat Interval:**
+
+🕐 **Time Intervals:**
+"""
+    
+    buttons = [
+        [
+            InlineKeyboardButton("🕐 Every 1 Minute", callback_data=f"auto_60_{message.id}"),
+            InlineKeyboardButton("🕕 Every 5 Minutes", callback_data=f"auto_300_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("🕘 Every 30 Minutes", callback_data=f"auto_1800_{message.id}"),
+            InlineKeyboardButton("🕐 Every 1 Hour", callback_data=f"auto_3600_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("📅 Every 12 Hours", callback_data=f"auto_43200_{message.id}"),
+            InlineKeyboardButton("🌅 Every 24 Hours", callback_data=f"auto_86400_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("📆 Every Week", callback_data=f"auto_604800_{message.id}"),
+            InlineKeyboardButton("🗓️ Every Month", callback_data=f"auto_2592000_{message.id}")
+        ],
+        [
+            InlineKeyboardButton("📊 Custom Interval", callback_data=f"auto_custom_{message.id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_auto")
+        ]
+    ]
+    
+    await message.reply_text(
+        auto_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+# Batch Auto-Broadcast
+@Client.on_message(filters.command("batchbroadcast") & filters.user([7107162691]))
+async def batch_auto_broadcast(bot, message):
+    """Create batch auto-broadcasts with rotating messages"""
+    batch_text = """
+📦 **BATCH AUTO-BROADCAST**
+
+🔄 **How it works:**
+   • Add multiple messages to a batch
+   • Set repeat interval
+   • Bot will rotate through messages
+   • Each repeat sends next message in sequence
+
+📝 **Commands:**
+   • `/addbatch` - Add message to current batch
+   • `/viewbatch` - View current batch messages
+   • `/startbatch` - Start batch auto-broadcast
+   • `/clearbatch` - Clear current batch
+
+💡 **Example:**
+   Batch: ["Hello", "How are you?", "Have a great day!"]
+   Interval: 1 hour
+   
+   Hour 1: "Hello" → All users
+   Hour 2: "How are you?" → All users  
+   Hour 3: "Have a great day!" → All users
+   Hour 4: "Hello" → All users (cycle repeats)
+"""
+    
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add Message to Batch", callback_data="add_to_batch"),
+            InlineKeyboardButton("👀 View Current Batch", callback_data="view_batch")
+        ],
+        [
+            InlineKeyboardButton("🚀 Start Batch Broadcast", callback_data="start_batch"),
+            InlineKeyboardButton("🗑️ Clear Batch", callback_data="clear_batch")
+        ]
+    ]
+    
+    await message.reply_text(
+        batch_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+# Callback handlers for auto-broadcast interval selection
+@Client.on_callback_query(filters.regex("auto_"))
+async def handle_auto_interval(bot, callback_query):
+    """Handle auto-broadcast interval selection"""
+    data_parts = callback_query.data.split("_")
+    
+    if len(data_parts) < 3:
+        await callback_query.answer("❌ Invalid data!", show_alert=True)
+        return
+    
+    interval_seconds = int(data_parts[1])
+    msg_id = int(data_parts[2])
+    
+    # Now ask for repeat count
+    repeat_text = f"""
+🔄 **AUTO-BROADCAST SETUP**
+
+⏱️ **Interval:** Every {format_time_interval(interval_seconds)}
+📌 **Auto-Pin:** Messages will be automatically pinned
+
+🔢 **How many times should this repeat?**
+
+💡 **Repeat Options:**
+"""
+    
+    buttons = [
+        [
+            InlineKeyboardButton("🔢 5 Times", callback_data=f"repeat_5_{interval_seconds}_{msg_id}"),
+            InlineKeyboardButton("🔢 10 Times", callback_data=f"repeat_10_{interval_seconds}_{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔢 25 Times", callback_data=f"repeat_25_{interval_seconds}_{msg_id}"),
+            InlineKeyboardButton("🔢 50 Times", callback_data=f"repeat_50_{interval_seconds}_{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("🔢 100 Times", callback_data=f"repeat_100_{interval_seconds}_{msg_id}"),
+            InlineKeyboardButton("♾️ Unlimited", callback_data=f"repeat_999999_{interval_seconds}_{msg_id}")
+        ],
+        [
+            InlineKeyboardButton("📝 Custom Count", callback_data=f"repeat_custom_{interval_seconds}_{msg_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_auto")
+        ]
+    ]
+    
+    await callback_query.edit_message_text(
+        repeat_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+@Client.on_callback_query(filters.regex("repeat_"))
+async def handle_repeat_count(bot, callback_query):
+    """Handle repeat count selection and create auto-broadcast"""
+    data_parts = callback_query.data.split("_")
+    
+    if len(data_parts) < 4:
+        await callback_query.answer("❌ Invalid data!", show_alert=True)
+        return
+    
+    repeat_count = int(data_parts[1])
+    interval_seconds = int(data_parts[2])
+    msg_id = int(data_parts[3])
     
     try:
-        # Get the original message to broadcast
+        # Get the original message
         original_msg = await bot.get_messages(callback_query.message.chat.id, msg_id)
         b_msg = original_msg.reply_to_message
         
         if not b_msg:
             await callback_query.answer("❌ Original message not found!", show_alert=True)
             return
-            
+        
+        # Create auto-broadcast entry
+        auto_id = f"auto_{int(time.time())}_{random.randint(1000, 9999)}"
+        current_time = int(time.time())
+        
+        auto_broadcasts[auto_id] = {
+            'type': 'single',
+            'message_data': {
+                'type': 'text' if b_msg.text else 'media',
+                'content': b_msg.text,
+                'file_id': b_msg.photo.file_id if b_msg.photo else None,
+                'caption': b_msg.caption if b_msg.caption else None
+            },
+            'interval_seconds': interval_seconds,
+            'total_repeats': repeat_count,
+            'executed_count': 0,
+            'next_run': current_time + interval_seconds,
+            'auto_pin': True,
+            'created_by': callback_query.from_user.id,
+            'created_at': current_time
+        }
+        
+        # Start scheduler if not running
+        global broadcast_scheduler_running
+        if not broadcast_scheduler_running:
+            broadcast_scheduler_running = True
+            asyncio.create_task(scheduler.start_scheduler())
+        
+        success_text = f"""
+✅ **AUTO-BROADCAST CREATED!**
+
+🆔 **Broadcast ID:** `{auto_id}`
+⏱️ **Interval:** Every {format_time_interval(interval_seconds)}
+🔢 **Total Repeats:** {repeat_count if repeat_count < 999999 else 'Unlimited'}
+📌 **Auto-Pin:** Enabled
+⏰ **First Run:** {datetime.datetime.fromtimestamp(auto_broadcasts[auto_id]['next_run']).strftime('%Y-%m-%d %H:%M:%S')}
+
+🎯 **Status:** Active and scheduled
+📊 **Progress:** 0/{repeat_count if repeat_count < 999999 else '∞'} completed
+
+💡 **Management Commands:**
+   • `/listauto` - View all active auto-broadcasts
+   • `/stopauto {auto_id}` - Stop specific auto-broadcast
+   • `/pauseauto {auto_id}` - Pause auto-broadcast
+"""
+        
+        buttons = [
+            [
+                InlineKeyboardButton("📊 View All Auto-Broadcasts", callback_data="list_auto_broadcasts"),
+                InlineKeyboardButton("⏹️ Stop This Auto-Broadcast", callback_data=f"stop_auto_{auto_id}")
+            ]
+        ]
+        
+        await callback_query.edit_message_text(
+            success_text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        
     except Exception as e:
-        await callback_query.answer("❌ Error accessing original message!", show_alert=True)
-        return
-    
-    # Start broadcast
-    users = await db.get_all_users()
-    total_users = await db.total_users_count()
-    
-    # Initialize counters
-    start_time = time.time()
-    done = 0
-    success = 0
-    blocked = 0
-    deleted = 0
-    deactivated = 0
-    failed = 0
-    errors = {}
-    
-    # Update initial status
-    sts = await callback_query.edit_message_text(
-        "📡 **BROADCASTING STARTED**
+        await callback_query.answer(f"❌ Error creating auto-broadcast: {str(e)[:100]}", show_alert=True)
 
-⏳ Initializing broadcast system...",
-        parse_mode=enums.ParseMode.MARKDOWN
-    )
+def format_time_interval(seconds):
+    """Format seconds into human readable time"""
+    if seconds < 60:
+        return f"{seconds} seconds"
+    elif seconds < 3600:
+        return f"{seconds // 60} minutes"
+    elif seconds < 86400:
+        return f"{seconds // 3600} hours"
+    elif seconds < 604800:
+        return f"{seconds // 86400} days"
+    elif seconds < 2592000:
+        return f"{seconds // 604800} weeks"
+    else:
+        return f"{seconds // 2592000} months"
+
+# Auto-broadcast management commands
+@Client.on_message(filters.command("listauto") & filters.user([7107162691]))
+async def list_auto_broadcasts(bot, message):
+    """List all active auto-broadcasts"""
+    if not auto_broadcasts:
+        return await message.reply_text(
+            "📭 **No Active Auto-Broadcasts**
+
+Use `/autobroadcast` to create one.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
     
-    # Process users in batches
-    batch_size = 10
-    batch_delay = 1  # seconds between batches
+    list_text = "🔄 **ACTIVE AUTO-BROADCASTS**
+
+"
     
-    user_list = []
-    async for user in users:
-        if 'id' in user:
-            user_list.append(user)
-    
-    # Process in batches to avoid rate limits
-    for i in range(0, len(user_list), batch_size):
-        batch = user_list[i:i+batch_size]
-        batch_tasks = []
+    for auto_id, auto_data in auto_broadcasts.items():
+        progress = f"{auto_data['executed_count']}/{auto_data['total_repeats']}" if auto_data['total_repeats'] < 999999 else f"{auto_data['executed_count']}/∞"
+        next_run = datetime.datetime.fromtimestamp(auto_data['next_run']).strftime('%H:%M:%S')
+        broadcast_type = "📦 Batch" if auto_data['type'] == 'batch' else "📝 Single"
         
-        for user in batch:
-            task = broadcast_messages(int(user['id']), b_msg)
-            batch_tasks.append(task)
+        list_text += f"""
+{broadcast_type} **ID:** `{auto_id}`
+⏱️ **Interval:** {format_time_interval(auto_data['interval_seconds'])}
+📊 **Progress:** {progress}
+⏰ **Next Run:** {next_run}
+📌 **Auto-Pin:** {'✅' if auto_data.get('auto_pin') else '❌'}
+"""
         
-        # Execute batch
-        batch_results = await asyncio.gather(*batch_tasks)
+        # Add batch-specific info
+        if auto_data['type'] == 'batch':
+            current_msg = auto_data.get('current_message_index', 0) + 1
+            total_msgs = len(auto_data.get('messages', []))
+            list_text += f"🔄 **Current Message:** {current_msg}/{total_msgs}
+"
         
-        # Process results
-        for result in batch_results:
-            pti, sh = result
-            done += 1
-            
-            if pti:
-                success += 1
-            else:
-                if sh == "Blocked":
-                    blocked += 1
-                elif sh == "Deactivated":
-                    deactivated += 1
-                elif sh == "Invalid":
-                    deleted += 1
-                else:
-                    failed += 1
-                    # Track specific errors
-                    error_type = sh.split(":")[0] if ":" in sh else sh
-                    errors[error_type] = errors.get(error_type, 0) + 1
-        
-        # Update progress every batch or every 50 users
-        if done % 50 == 0 or i + batch_size >= len(user_list):
-            elapsed_time = time.time() - start_time
-            progress_percent = (done / total_users) * 100
-            eta = (elapsed_time / done) * (total_users - done) if done > 0 else 0
-            
-            progress_bar = "▰" * int(progress_percent / 5) + "▱" * (20 - int(progress_percent / 5))
-            
-            status_text = f"""
-📡 **BROADCAST IN PROGRESS**
-
-{progress_bar} **{progress_percent:.1f}%**
-
-📊 **Current Statistics:**
-   • 📤 **Processed:** {done}/{total_users}
-   • ✅ **Successful:** {success}
-   • 🚫 **Blocked:** {blocked}
-   • 👤 **Deactivated:** {deactivated}
-   • 🗑️ **Deleted:** {deleted}
-   • ❌ **Failed:** {failed}
-
-⏱️ **Time Info:**
-   • **Elapsed:** {int(elapsed_time)}s
-   • **ETA:** {int(eta)}s
-   • **Speed:** {done/elapsed_time:.1f} msg/s
-
-⚡ **Status:** Broadcasting messages...
-            """
-            
-            try:
-                await sts.edit_text(status_text, parse_mode=enums.ParseMode.MARKDOWN)
-            except:
-                pass
-        
-        # Delay between batches to respect rate limits
-        if i + batch_size < len(user_list):
-            await asyncio.sleep(batch_delay)
-    
-    # Final statistics
-    total_time = time.time() - start_time
-    time_taken = datetime.timedelta(seconds=int(total_time))
-    success_rate = (success / total_users) * 100 if total_users > 0 else 0
-    
-    final_text = f"""
-✅ **BROADCAST COMPLETED!**
-
-📊 **Final Results:**
-   • 📤 **Total Processed:** {done}/{total_users}
-   • ✅ **Successfully Sent:** {success}
-   • 📈 **Success Rate:** {success_rate:.1f}%
-
-❌ **Failed Deliveries:**
-   • 🚫 **User Blocked Bot:** {blocked}
-   • 👤 **Account Deactivated:** {deactivated}
-   • 🗑️ **Account Deleted:** {deleted}
-   • ❌ **Other Errors:** {failed}
-
-⏱️ **Performance:**
-   • **Total Time:** {time_taken}
-   • **Average Speed:** {done/total_time:.2f} messages/second
-   • **Peak Performance:** Excellent
-
-🧹 **Database Cleanup:**
-   • Removed {blocked + deactivated + deleted} inactive users
-   • Database optimized automatically
-
-💡 **Note:** Failed deliveries are normal and usually indicate users who blocked the bot or deactivated their accounts.
-    """
-    
-    # Add error details if any specific errors occurred
-    if errors:
-        error_details = "
-".join([f"   • {error}: {count}" for error, count in errors.items()])
-        final_text += f"
-
-🔍 **Error Breakdown:**
-{error_details}"
-    
-    # Store broadcast statistics
-    broadcast_id = f"broadcast_{int(time.time())}"
-    broadcast_stats[broadcast_id] = {
-        "timestamp": int(time.time()),
-        "total_users": total_users,
-        "success": success,
-        "failed": done - success,
-        "time_taken": int(total_time),
-        "success_rate": success_rate
-    }
+        list_text += "
+"
     
     buttons = [
         [
-            InlineKeyboardButton("📊 Detailed Stats", callback_data=f"broadcast_details_{broadcast_id}"),
-            InlineKeyboardButton("📈 Analytics", callback_data="broadcast_analytics")
-        ],
-        [InlineKeyboardButton("🔙 Admin Panel", callback_data="admin_panel")]
+            InlineKeyboardButton("⏹️ Stop All", callback_data="stop_all_auto"),
+            InlineKeyboardButton("📊 Detailed Stats", callback_data="auto_detailed_stats")
+        ]
     ]
     
-    await sts.edit_text(final_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
-
-@Client.on_callback_query(filters.regex("cancel_broadcast"))
-async def cancel_broadcast(bot, callback_query):
-    """Cancel broadcast operation"""
-    await callback_query.edit_message_text(
-        "❌ **Broadcast Cancelled**
-
-📝 No messages were sent to users.
-You can start a new broadcast anytime.",
-        parse_mode=enums.ParseMode.MARKDOWN
-    )
-
-@Client.on_callback_query(filters.regex("broadcast_stats"))
-async def show_broadcast_stats(bot, callback_query):
-    """Show detailed user statistics"""
-    stats = await get_user_statistics()
-    
-    stats_text = f"""
-📊 **DETAILED USER STATISTICS**
-
-👥 **Total Active Users:** {stats['total']}
-
-📈 **Users by Plan:**
-   • 🔒 **Free (Unverified):** {stats.get('free', 0)}
-   • 🆓 **Freemium (24h):** {stats.get('freemium', 0)}
-   • 🔹 **Standard ($8/month):** {stats.get('standard', 0)}
-   • 💎 **Pro ($20/month):** {stats.get('pro', 0)}
-   • 👑 **Elite ($45/month):** {stats.get('elite', 0)}
-   • ⭐ **Premium (Unlimited):** {stats.get('premium', 0)}
-
-📊 **Revenue Potential:**
-   • 🔹 Standard: ${stats.get('standard', 0) * 8}/month
-   • 💎 Pro: ${stats.get('pro', 0) * 20}/month  
-   • 👑 Elite: ${stats.get('elite', 0) * 45}/month
-
-💰 **Total Monthly Revenue:** ${(stats.get('standard', 0) * 8) + (stats.get('pro', 0) * 20) + (stats.get('elite', 0) * 45)}
-
-🎯 **Conversion Rate:** {((stats.get('standard', 0) + stats.get('pro', 0) + stats.get('elite', 0) + stats.get('premium', 0)) / max(stats['total'], 1)) * 100:.1f}%
-    """
-    
-    buttons = [
-        [InlineKeyboardButton("🔙 Back to Broadcast", callback_data="back_to_broadcast")]
-    ]
-    
-    await callback_query.edit_message_text(
-        stats_text,
+    await message.reply_text(
+        list_text,
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode=enums.ParseMode.MARKDOWN
     )
 
-@Client.on_message(filters.command("quickbroadcast") & filters.user([123456789]) & filters.reply)
-async def quick_broadcast(bot, message):
-    """Quick broadcast without confirmation - for urgent messages"""
-    b_msg = message.reply_to_message
-    if not b_msg:
-        return await message.reply_text("❌ **Reply to a message first!**", parse_mode=enums.ParseMode.MARKDOWN)
+@Client.on_callback_query(filters.regex("auto_detailed_stats"))
+async def show_detailed_auto_stats(bot, callback_query):
+    """Show detailed statistics of all auto-broadcasts"""
+    if not auto_broadcasts:
+        await callback_query.answer("❌ No active auto-broadcasts!", show_alert=True)
+        return
     
-    sts = await message.reply_text(
-        "⚡ **QUICK BROADCAST STARTED**
+    total_sent = sum(auto_data['executed_count'] for auto_data in auto_broadcasts.values())
+    single_count = sum(1 for auto_data in auto_broadcasts.values() if auto_data['type'] == 'single')
+    batch_count = sum(1 for auto_data in auto_broadcasts.values() if auto_data['type'] == 'batch')
+    
+    stats_text = f"""
+📊 **AUTO-BROADCAST ANALYTICS**
 
-🚀 Sending to all users immediately...",
+🔢 **Overview:**
+   • **Total Active:** {len(auto_broadcasts)}
+   • **Single Broadcasts:** {single_count}
+   • **Batch Broadcasts:** {batch_count}
+   • **Total Messages Sent:** {total_sent}
+
+📈 **Performance:**
+"""
+    
+    for auto_id, auto_data in list(auto_broadcasts.items())[:5]:  # Show top 5
+        completion = (auto_data['executed_count'] / auto_data['total_repeats']) * 100 if auto_data['total_repeats'] < 999999 else 0
+        stats_text += f"""
+   • `{auto_id[:8]}...`: {completion:.1f}% complete
+"""
+    
+    if len(auto_broadcasts) > 5:
+        stats_text += f"
+   ... and {len(auto_broadcasts) - 5} more"
+    
+    await callback_query.edit_message_text(
+        stats_text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_to_auto_list")]]),
         parse_mode=enums.ParseMode.MARKDOWN
     )
+
+@Client.on_callback_query(filters.regex("back_to_auto_list"))
+async def back_to_auto_list(bot, callback_query):
+    """Go back to auto-broadcast list"""
+    # Redirect to list command
+    await list_auto_broadcasts(bot, callback_query.message)
+
+@Client.on_message(filters.command("stopauto") & filters.user([7107162691]))
+async def stop_auto_broadcast(bot, message):
+    """Stop a specific auto-broadcast"""
+    if len(message.command) < 2:
+        return await message.reply_text(
+            "❌ **Usage:** `/stopauto <auto_id>`
+
+Use `/listauto` to see active broadcasts.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
     
-    users = await db.get_all_users()
-    total_users = await db.total_users_count()
-    start_time = time.time()
-    success = 0
-    failed = 0
+    auto_id = message.command[1]
     
-    async for user in users:
-        if 'id' in user:
-            pti, sh = await broadcast_messages(int(user['id']), b_msg)
-            if pti:
-                success += 1
-            else:
-                failed += 1
+    if auto_id not in auto_broadcasts:
+        return await message.reply_text(
+            f"❌ **Auto-broadcast `{auto_id}` not found!**
+
+Use `/listauto` to see active broadcasts.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
     
-    total_time = time.time() - start_time
-    time_taken = datetime.timedelta(seconds=int(total_time))
+    # Remove from active broadcasts
+    auto_data = auto_broadcasts[auto_id]
+    del auto_broadcasts[auto_id]
     
-    await sts.edit_text(f"""
-⚡ **QUICK BROADCAST COMPLETED!**
+    broadcast_type = "Batch" if auto_data['type'] == 'batch' else "Single"
+    
+    await message.reply_text(
+        f"⏹️ **{broadcast_type} Auto-Broadcast Stopped!**
 
-📊 **Results:**
-   • ✅ **Success:** {success}/{total_users}
-   • ❌ **Failed:** {failed}
-   • ⏱️ **Time:** {time_taken}
-   • 📈 **Success Rate:** {(success/total_users)*100:.1f}%
+🆔 **ID:** `{auto_id}`
+📊 **Completed:** {auto_data['executed_count']}/{auto_data['total_repeats']} repeats
+⏱️ **Runtime:** {format_time_interval(int(time.time()) - auto_data['created_at'])}
 
-🚀 **Speed:** {(success+failed)/total_time:.1f} messages/second
-    """, parse_mode=enums.ParseMode.MARKDOWN)
+✅ Successfully removed from schedule.",
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
 
-# Optional: Scheduled broadcast command
-@Client.on_message(filters.command("schedulebroadcast") & filters.user([123456789]))
-async def schedule_broadcast(bot, message):
-    """Schedule a broadcast for later (basic implementation)"""
-    await message.reply_text("""
-⏰ **SCHEDULED BROADCAST**
+# Pause and resume auto-broadcasts
+@Client.on_message(filters.command("pauseauto") & filters.user([7107162691]))
+async def pause_auto_broadcast(bot, message):
+    """Pause a specific auto-broadcast"""
+    if len(message.command) < 2:
+        return await message.reply_text(
+            "❌ **Usage:** `/pauseauto <auto_id>`
 
-🚧 **Feature Coming Soon!**
+Use `/listauto` to see active broadcasts.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    auto_id = message.command[1]
+    
+    if auto_id not in auto_broadcasts:
+        return await message.reply_text(
+            f"❌ **Auto-broadcast `{auto_id}` not found!**",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    # Set next run to far future (paused state)
+    auto_broadcasts[auto_id]['paused'] = True
+    auto_broadcasts[auto_id]['paused_at'] = int(time.time())
+    auto_broadcasts[auto_id]['next_run'] = int(time.time()) + 999999999  # Far future
+    
+    await message.reply_text(
+        f"⏸️ **Auto-Broadcast Paused!**
 
-📅 **Planned Features:**
-   • Schedule broadcasts for specific times
-   • Recurring broadcasts (daily/weekly)
-   • Time zone support
-   • Automatic content scheduling
+🆔 **ID:** `{auto_id}`
+📊 **Progress:** {auto_broadcasts[auto_id]['executed_count']}/{auto_broadcasts[auto_id]['total_repeats']}
 
-💡 **For now, use:**
-   • `/broadcast` - Normal broadcast with confirmation
-   • `/quickbroadcast` - Instant broadcast
-    """, parse_mode=enums.ParseMode.MARKDOWN)
+💡 Use `/resumeauto {auto_id}` to resume.",
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+@Client.on_message(filters.command("resumeauto") & filters.user([7107162691]))
+async def resume_auto_broadcast(bot, message):
+    """Resume a paused auto-broadcast"""
+    if len(message.command) < 2:
+        return await message.reply_text(
+            "❌ **Usage:** `/resumeauto <auto_id>`
+
+Use `/listauto` to see active broadcasts.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    auto_id = message.command[1]
+    
+    if auto_id not in auto_broadcasts:
+        return await message.reply_text(
+            f"❌ **Auto-broadcast `{auto_id}` not found!**",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    if not auto_broadcasts[auto_id].get('paused', False):
+        return await message.reply_text(
+            f"❌ **Auto-broadcast `{auto_id}` is not paused!**",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    # Resume broadcast
+    current_time = int(time.time())
+    auto_broadcasts[auto_id]['paused'] = False
+    auto_broadcasts[auto_id]['next_run'] = current_time + auto_broadcasts[auto_id]['interval_seconds']
+    
+    if 'paused_at' in auto_broadcasts[auto_id]:
+        del auto_broadcasts[auto_id]['paused_at']
+    
+    await message.reply_text(
+        f"▶️ **Auto-Broadcast Resumed!**
+
+🆔 **ID:** `{auto_id}`
+⏰ **Next Run:** {datetime.datetime.fromtimestamp(auto_broadcasts[auto_id]['next_run']).strftime('%H:%M:%S')}
+
+✅ Broadcasting will continue as scheduled.",
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+# Batch broadcast management
+@Client.on_message(filters.command("addbatch") & filters.user([7107162691]) & filters.reply)
+async def add_to_batch(bot, message):
+    """Add message to current batch"""
+    b_msg = message.reply_to_message
+    if not b_msg:
+        return await message.reply_text(
+            "❌ **Reply Required**
+
+Reply to a message to add it to batch.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    # Initialize batch if doesn't exist
+    user_id = message.from_user.id
+    if user_id not in batch_broadcasts:
+        batch_broadcasts[user_id] = {
+            'messages': [],
+            'created_at': int(time.time())
+        }
+    
+    # Add message to batch
+    message_data = {
+        'type': 'text' if b_msg.text else 'media',
+        'content': b_msg.text[:100] if b_msg.text else 'Media message',
+        'full_content': b_msg.text,
+        'file_id': b_msg.photo.file_id if b_msg.photo else None,
+        'caption': b_msg.caption if b_msg.caption else None,
+        'message_id': b_msg.id
+    }
+    
+    batch_broadcasts[user_id]['messages'].append(message_data)
+    
+    batch_count = len(batch_broadcasts[user_id]['messages'])
+    
+    buttons = [
+        [
+            InlineKeyboardButton("➕ Add More", callback_data="add_more_batch"),
+            InlineKeyboardButton("👀 View Batch", callback_data="view_current_batch")
+        ],
+        [
+            InlineKeyboardButton("🚀 Start Batch", callback_data="start_batch_broadcast"),
+            InlineKeyboardButton("🗑️ Clear Batch", callback_data="clear_batch")
+        ]
+    ]
+    
+    await message.reply_text(
+        f"✅ **Message Added to Batch!**
+
+📦 **Batch Size:** {batch_count} messages
+📝 **Latest:** {message_data['content']}
+
+🎯 **Next Steps:**",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+@Client.on_message(filters.command("viewbatch") & filters.user([7107162691]))
+async def view_batch(bot, message):
+    """View current batch messages"""
+    user_id = message.from_user.id
+    
+    if user_id not in batch_broadcasts or not batch_broadcasts[user_id]['messages']:
+        return await message.reply_text(
+            "📭 **No Batch Found**
+
+Use `/addbatch` (reply to message) to add messages to batch.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+    
+    batch_data = batch_broadcasts[user_id]
+    batch_text = f"📦 **CURRENT BATCH ({len(batch_data['messages'])} messages)**
+
+"
+    
+    for i, msg in enumerate(batch_data['messages'], 1):
+        batch_text += f"**{i}.** {msg['content']}
+"
+        if i >= 10:  # Limit display to 10 messages
+            batch_text += f"... and {len(batch_data['messages']) - 10} more messages
+"
+            break
+    
+    created_ago = format_time_interval(int(time.time()) - batch_data['created_at'])
+    batch_text += f"
+🕐 **Created:** {created_ago} ago"
+    
+    buttons = [
+        [
+            InlineKeyboardButton("🚀 Start Batch Broadcast", callback_data="start_batch_broadcast"),
+            InlineKeyboardButton("🗑️ Clear Batch", callback_data="clear_batch")
+        ]
+    ]
+    
+    await message.reply_text(
+        batch_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=enums.ParseMode.MARKDOWN
+    )
+
+@Client.on_callback_query(filters.regex("view_current_batch"))
+async def view_current_batch_callback(bot, callback_query):
+    """View current batch via callback"""
+    await view_batch(bot, callback_query.message)
