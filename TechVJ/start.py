@@ -4,10 +4,13 @@
 
 import os
 import asyncio 
+import time
 import pyrogram
+import requests
+import json
 from pyrogram import Client, filters, enums
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated, UserAlreadyParticipant, InviteHashExpired, UsernameNotOccupied
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from config import API_ID, API_HASH, ERROR_MESSAGE
 from database.db import db
 from TechVJ.strings import HELP_TXT
@@ -15,192 +18,564 @@ from TechVJ.strings import HELP_TXT
 class batch_temp(object):
     IS_BATCH = {}
 
+# Configuration constants
+SHRINKME_API_KEY = "6a5a6ce8d33950c63502d761ae11bf36632f08ca"
+FREEMIUM_DURATION = 86400  # 24 hours
+
+def generate_shrink_url(destination_url, alias=None):
+    """Generate shortened URL using ShrinkMe API"""
+    try:
+        if alias:
+            api_url = f"https://shrinkme.io/api?api={SHRINKME_API_KEY}&url={destination_url}&alias={alias}"
+        else:
+            api_url = f"https://shrinkme.io/api?api={SHRINKME_API_KEY}&url={destination_url}"
+        
+        response = requests.get(api_url)
+        data = response.json()
+        
+        if data.get("status") == "success":
+            return data.get("shortenedUrl")
+        else:
+            # If alias exists, try without alias
+            if alias:
+                return generate_shrink_url(destination_url)
+            return None
+    except:
+        return None
+
+async def stylish_progress_bar(client, chat_id, message_id, progress_type="Downloading"):
+    """Advanced animated progress bar"""
+    progress_frames = [
+        f"🔄 **{progress_type}**
+▱▱▱▱▱▱▱▱▱▱ 0%",
+        f"🔄 **{progress_type}**
+▰▱▱▱▱▱▱▱▱▱ 10%",
+        f"🔄 **{progress_type}**
+▰▰▱▱▱▱▱▱▱▱ 20%",
+        f"🔄 **{progress_type}**
+▰▰▰▱▱▱▱▱▱▱ 30%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▱▱▱▱▱▱ 40%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▰▱▱▱▱▱ 50%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▰▰▱▱▱▱ 60%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▰▰▰▱▱▱ 70%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▰▰▰▰▱▱ 80%",
+        f"🔄 **{progress_type}**
+▰▰▰▰▰▰▰▰▰▱ 90%",
+        f"✅ **{progress_type} Complete!**
+▰▰▰▰▰▰▰▰▰▰ 100%"
+    ]
+    
+    for frame in progress_frames:
+        try:
+            await client.edit_message_text(chat_id, message_id, frame, parse_mode=enums.ParseMode.MARKDOWN)
+            await asyncio.sleep(0.5)
+        except:
+            await asyncio.sleep(0.3)
+
 async def downstatus(client, statusfile, message, chat):
     while True:
         if os.path.exists(statusfile):
             break
-
         await asyncio.sleep(3)
       
     while os.path.exists(statusfile):
         with open(statusfile, "r") as downread:
             txt = downread.read()
         try:
-            await client.edit_message_text(chat, message.id, f"**Downloaded:** **{txt}**")
-            await asyncio.sleep(10)
+            progress_bar = "▰" * int(float(txt.replace('%', '')) / 10) + "▱" * (10 - int(float(txt.replace('%', '')) / 10))
+            await client.edit_message_text(chat, message.id, f"📥 **Downloading...**
+
+{progress_bar} **{txt}**
+
+⚡ Processing your request...", parse_mode=enums.ParseMode.MARKDOWN)
+            await asyncio.sleep(2)
         except:
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
 
-
-# upload status
 async def upstatus(client, statusfile, message, chat):
     while True:
         if os.path.exists(statusfile):
             break
-
         await asyncio.sleep(3)      
     while os.path.exists(statusfile):
         with open(statusfile, "r") as upread:
             txt = upread.read()
         try:
-            await client.edit_message_text(chat, message.id, f"**Uploaded:** **{txt}**")
-            await asyncio.sleep(10)
+            progress_bar = "▰" * int(float(txt.replace('%', '')) / 10) + "▱" * (10 - int(float(txt.replace('%', '')) / 10))
+            await client.edit_message_text(chat, message.id, f"📤 **Uploading...**
+
+{progress_bar} **{txt}**
+
+🚀 Almost done!", parse_mode=enums.ParseMode.MARKDOWN)
+            await asyncio.sleep(2)
         except:
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
 
-
-# progress writer
 def progress(current, total, message, type):
     with open(f'{message.id}{type}status.txt', "w") as fileup:
         fileup.write(f"{current * 100 / total:.1f}%")
 
+# CALLBACK QUERY HANDLER FOR INLINE BUTTONS
+@Client.on_callback_query()
+async def callback_handler(client: Client, callback_query: CallbackQuery):
+    data = callback_query.data
+    chat_id = callback_query.from_user.id
+    message_id = callback_query.message.id
 
-# start command
+    if data == "verify_btn":
+        await handle_verify_callback(client, callback_query)
+    elif data == "my_plan_btn":
+        await handle_my_plan_callback(client, callback_query)
+    elif data == "plans_btn":
+        await handle_plans_callback(client, callback_query)
+    elif data == "help_btn":
+        await handle_help_callback(client, callback_query)
+    elif data == "back_to_main":
+        await handle_back_to_main(client, callback_query)
+    elif data == "refresh_plan":
+        await handle_my_plan_callback(client, callback_query)
+    elif data.startswith("buy_"):
+        plan = data.replace("buy_", "")
+        await handle_buy_plan(client, callback_query, plan)
+
+async def handle_verify_callback(client: Client, callback_query: CallbackQuery):
+    chat_id = callback_query.from_user.id
+    role = await db.get_user_role(chat_id)
+    
+    if role != "free":
+        await callback_query.answer("✅ You are already verified!", show_alert=True)
+        return
+    
+    code = await db.generate_or_get_code(chat_id)
+    bot_username = (await client.get_me()).username
+    destination_url = f"https://t.me/{bot_username}?start=add_premium_{chat_id}_{code}_freemium"
+    
+    # Generate unique alias
+    alias = f"verify_{chat_id}_{int(time.time())}"
+    verify_link = generate_shrink_url(destination_url, alias)
+    
+    if not verify_link:
+        await callback_query.answer("❌ Error generating verification link. Try again!", show_alert=True)
+        return
+    
+    verify_text = f"""
+🔓 **VERIFICATION PROCESS**
+
+🎯 **Get 24 Hours Freemium Access:**
+   • 📁 Max 3 files per batch
+   • 🔢 4 batches daily (12 posts/day)
+   • 💾 Save restricted content
+   • ⚡ Fast processing
+
+🔗 **Your Personal Verification Link:**
+Click the button below to complete verification
+
+⚠️ **Security Notice:**
+   • ✅ Link is personalized for you
+   • ⏰ Valid for limited time only
+   • 🚫 Don't share with others
+   • 🔄 Complete all steps to activate
+
+💎 **After verification, check /plan for premium upgrades!**
+    """
+    
+    buttons = [
+        [InlineKeyboardButton("🔓 Complete Verification", url=verify_link)],
+        [InlineKeyboardButton("🔄 Refresh Link", callback_data="verify_btn")],
+        [InlineKeyboardButton("📋 View All Plans", callback_data="plans_btn")],
+        [InlineKeyboardButton("❓ How to Verify?", callback_data="help_verify")],
+        [InlineKeyboardButton("🏠 Back to Main", callback_data="back_to_main")]
+    ]
+    
+    try:
+        await callback_query.edit_message_text(verify_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+    except:
+        await callback_query.answer("Please try again!", show_alert=True)
+
+async def handle_my_plan_callback(client: Client, callback_query: CallbackQuery):
+    chat_id = callback_query.from_user.id
+    stats = await db.get_user_stats(chat_id)
+    
+    if not stats:
+        await callback_query.answer("❌ Error loading your plan info!", show_alert=True)
+        return
+    
+    role = stats["role"]
+    usage = stats["usage"]
+    expiry_readable = stats["expiry_readable"]
+    
+    # Define limits
+    limits = {
+        "freemium": {"files_per_batch": 3, "daily_batches": 4, "emoji": "🆓"},
+        "standard": {"files_per_batch": 20, "daily_batches": 10, "emoji": "🔹"},
+        "pro": {"files_per_batch": 50, "daily_batches": 15, "emoji": "💎"},
+        "elite": {"files_per_batch": 100, "daily_batches": 15, "emoji": "👑"},
+        "premium": {"files_per_batch": 1000, "daily_batches": 1000, "emoji": "⭐"},
+        "free": {"files_per_batch": 0, "daily_batches": 0, "emoji": "🔒"}
+    }
+    
+    limit = limits.get(role, limits["free"])
+    
+    if role == "free":
+        plan_text = """
+🔒 **ACCOUNT STATUS: FREE**
+
+❌ **No Active Plan**
+You need to verify to use this bot.
+
+🎯 **What you're missing:**
+   • Save restricted content
+   • Forward private channel posts
+   • Download media files
+
+⚡ **Get instant access by verifying below!**
+        """
+        buttons = [
+            [InlineKeyboardButton("🔓 Verify Now", callback_data="verify_btn")],
+            [InlineKeyboardButton("📋 View All Plans", callback_data="plans_btn")]
+        ]
+    else:
+        remaining_batches = max(0, limit["daily_batches"] - usage["batches"])
+        used_percentage = (usage["batches"] / limit["daily_batches"]) * 100 if limit["daily_batches"] > 0 else 0
+        
+        progress_bar = "▰" * int(used_percentage / 10) + "▱" * (10 - int(used_percentage / 10))
+        
+        plan_text = f"""
+{limit["emoji"]} **CURRENT PLAN: {role.upper()}**
+
+📊 **Usage Statistics:**
+   • **Batches Used:** {usage["batches"]}/{limit["daily_batches"]}
+   • **Remaining:** {remaining_batches} batches
+   • **Files per Batch:** {limit["files_per_batch"]}
+   
+📈 **Daily Progress:**
+{progress_bar} **{used_percentage:.1f}%**
+
+⏰ **Plan Details:**
+   • **Status:** {"Active" if role != "free" else "Inactive"}
+   • **Expiry:** {expiry_readable if role == "freemium" else "No Expiry"}
+
+💡 **Tips:**
+   • Usage resets every 24 hours
+   • Upgrade for more features
+        """
+        
+        buttons = [
+            [InlineKeyboardButton("🔄 Refresh Stats", callback_data="refresh_plan")],
+            [InlineKeyboardButton("📈 Upgrade Plan", callback_data="plans_btn")],
+            [InlineKeyboardButton("📋 All Plans", callback_data="plans_btn")],
+            [InlineKeyboardButton("❓ Help", callback_data="help_btn")]
+        ]
+    
+    buttons.append([InlineKeyboardButton("🏠 Back to Main", callback_data="back_to_main")])
+    
+    try:
+        await callback_query.edit_message_text(plan_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+    except:
+        await callback_query.answer("Please try again!", show_alert=True)
+
+async def handle_plans_callback(client: Client, callback_query: CallbackQuery):
+    plans_text = """
+💎 **AVAILABLE SUBSCRIPTION PLANS**
+
+🆓 **FREEMIUM** (24 Hours)
+   • 📁 3 files per batch
+   • 🔢 4 batches daily
+   • 💰 **FREE** (After Verification)
+
+🔹 **STANDARD** 
+   • 📁 20 files per batch  
+   • 🔢 10 batches daily (200 posts)
+   • 💰 **$8/month**
+
+💎 **PRO**
+   • 📁 50 files per batch
+   • 🔢 15 batches daily (750 posts) 
+   • 💰 **$20/month**
+
+👑 **ELITE** (Best Value!)
+   • 📁 100 files per batch
+   • 🔢 15 batches daily (1500 posts)
+   • 💰 **$45/month**
+
+⭐ **PREMIUM** (Unlimited)
+   • 📁 1000+ files per batch
+   • 🔢 Unlimited batches
+   • 💰 **Contact Admin**
+
+✨ **All paid plans include:**
+   • No ads • Priority support • Advanced features
+    """
+    
+    buttons = [
+        [
+            InlineKeyboardButton("🛒 Buy Standard", callback_data="buy_standard"),
+            InlineKeyboardButton("🛒 Buy Pro", callback_data="buy_pro")
+        ],
+        [
+            InlineKeyboardButton("🛒 Buy Elite", callback_data="buy_elite"),
+            InlineKeyboardButton("⭐ Get Premium", url="https://t.me/PLAYZ_90")
+        ],
+        [InlineKeyboardButton("🆓 Get Freemium", callback_data="verify_btn")],
+        [InlineKeyboardButton("📊 My Current Plan", callback_data="my_plan_btn")],
+        [InlineKeyboardButton("🏠 Back to Main", callback_data="back_to_main")]
+    ]
+    
+    try:
+        await callback_query.edit_message_text(plans_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+    except:
+        await callback_query.answer("Please try again!", show_alert=True)
+
+async def handle_help_callback(client: Client, callback_query: CallbackQuery):
+    help_text = f"""
+📚 **HELP & COMMANDS**
+
+🤖 **Bot Commands:**
+   • `/start` - Start the bot
+   • `/help` - Show this help
+   • `/verify` - Get verification link  
+   • `/my_plan` - Check your plan
+   • `/plan` - View all plans
+   • `/cancel` - Cancel current batch
+
+🔗 **How to Use:**
+   1. Send any Telegram link
+   2. Bot will save the content
+   3. Works with private channels
+   4. Supports all media types
+
+🎯 **Link Formats Supported:**
+   • `https://t.me/username/123`
+   • `https://t.me/c/123456/789`
+   • `https://t.me/b/botname/start`
+
+⚠️ **Requirements:**
+   • Must `/login` first for restricted content
+   • Need verification for access
+   • Respect usage limits
+
+💡 **Pro Tips:**
+   • Use batch links: `t.me/channel/1-10`
+   • Cancel anytime with `/cancel`
+   • Upgrade for more features
+
+{HELP_TXT}
+    """
+    
+    buttons = [
+        [
+            InlineKeyboardButton("🔓 Verify Account", callback_data="verify_btn"),
+            InlineKeyboardButton("📊 My Plan", callback_data="my_plan_btn")
+        ],
+        [
+            InlineKeyboardButton("💬 Support Group", url="https://t.me/PLAY_Z_HACKING_DISCUSSION"),
+            InlineKeyboardButton("📢 Updates", url="https://t.me/+ahE-9i84aFxkOWNl")
+        ],
+        [InlineKeyboardButton("🏠 Back to Main", callback_data="back_to_main")]
+    ]
+    
+    try:
+        await callback_query.edit_message_text(help_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+    except:
+        await callback_query.answer("Please try again!", show_alert=True)
+
+async def handle_buy_plan(client: Client, callback_query: CallbackQuery, plan):
+    plan_info = {
+        "standard": {"price": "$8", "name": "Standard"},
+        "pro": {"price": "$20", "name": "Pro"}, 
+        "elite": {"price": "$45", "name": "Elite"}
+    }
+    
+    info = plan_info.get(plan, {"price": "Contact", "name": "Premium"})
+    
+    buy_text = f"""
+💳 **PURCHASE {info['name'].upper()} PLAN**
+
+💰 **Price:** {info['price']}/month
+
+🔗 **Payment Methods:**
+   • UPI (India)
+   • PayPal (International) 
+   • Crypto (Bitcoin/USDT)
+   • Bank Transfer
+
+📞 **To Purchase:**
+   1. Contact admin using button below
+   2. Send screenshot of payment
+   3. Get instant activation
+
+⚡ **Instant Activation** after payment verification!
+    """
+    
+    buttons = [
+        [InlineKeyboardButton(f"💰 Pay {info['price']} Now", url="https://t.me/PLAYZ_90")],
+        [InlineKeyboardButton("💬 Payment Support", url="https://t.me/PLAY_Z_HACKING_DISCUSSION")],
+        [InlineKeyboardButton("📋 Back to Plans", callback_data="plans_btn")],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="back_to_main")]
+    ]
+    
+    await callback_query.edit_message_text(buy_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+
+async def handle_back_to_main(client: Client, callback_query: CallbackQuery):
+    chat_id = callback_query.from_user.id
+    role = await db.get_user_role(chat_id)
+    
+    if role == "free":
+        welcome_text = f"""
+🤖 **PLAY-Z RESTRICTED SAVER BOT**
+
+👋 **Welcome {callback_query.from_user.first_name}!**
+
+🔒 **Account Status:** Not Verified
+
+🎯 **Get Started:**
+   • Verify to unlock features
+   • Save restricted content  
+   • Forward private posts
+   • Download media files
+
+⚡ **Click verify to get 24h freemium access!**
+        """
+        buttons = [
+            [InlineKeyboardButton("🔓 Verify Now", callback_data="verify_btn")],
+            [InlineKeyboardButton("📋 View Plans", callback_data="plans_btn")],
+            [InlineKeyboardButton("❓ Help", callback_data="help_btn")],
+            [InlineKeyboardButton("👑 Developer", url="https://t.me/PLAYZ_90")]
+        ]
+    else:
+        role_emoji = {"freemium": "🆓", "standard": "🔹", "pro": "💎", "elite": "👑", "premium": "⭐"}
+        welcome_text = f"""
+🤖 **PLAY-Z RESTRICTED SAVER BOT**
+
+👋 **Welcome Back {callback_query.from_user.first_name}!**
+
+{role_emoji.get(role, "🔹")} **Plan:** {role.capitalize()}
+
+🚀 **Ready to use!**
+   • Send Telegram links to save
+   • Check your usage stats
+   • Upgrade for more features
+
+💡 **Send any link to start!**
+        """
+        buttons = [
+            [InlineKeyboardButton("📊 My Plan", callback_data="my_plan_btn")],
+            [InlineKeyboardButton("📈 Upgrade", callback_data="plans_btn")],
+            [InlineKeyboardButton("❓ Help", callback_data="help_btn")],
+            [InlineKeyboardButton("👑 Developer", url="https://t.me/PLAYZ_90")]
+        ]
+    
+    buttons.extend([
+        [
+            InlineKeyboardButton('🔍 Support', url='https://t.me/PLAY_Z_HACKING_DISCUSSION'),
+            InlineKeyboardButton('📢 Updates', url='https://t.me/+ahE-9i84aFxkOWNl')
+        ]
+    ])
+    
+    try:
+        await callback_query.edit_message_text(welcome_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
+    except:
+        await callback_query.answer("Please try again!", show_alert=True)
+
+# START COMMAND WITH VERIFICATION HANDLING  
 @Client.on_message(filters.command(["start"]))
 async def send_start(client: Client, message: Message):
-    if not await db.is_user_exist(message.from_user.id):
-        await db.add_user(message.from_user.id, message.from_user.first_name)
-    buttons = [[
-        InlineKeyboardButton("👑 Developer", url = "https://t.me/PLAYZ_90")
-    ],[
-        InlineKeyboardButton('🔍 sᴜᴘᴘᴏʀᴛ ɢʀᴏᴜᴘ', url='https://t.me/PLAY_Z_HACKING_DISCUSSION'),
-        InlineKeyboardButton('🤖 ᴜᴘᴅᴀᴛᴇ ᴄʜᴀɴɴᴇʟ', url='https://t.me/+ahE-9i84aFxkOWNl')
-    ]]
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await client.send_message(
-        chat_id=message.chat.id, 
-        text=f"<b>👋 Hi {message.from_user.mention}, I am Save Restricted Saving Content Bot🤖 by - PLAY-Z HACKING👑, I can send you restricted content by its post link🔗.\n\nFor downloading restricted content /login first.\n\nKnow how to use bot by - /help</b>", 
-        reply_markup=reply_markup, 
-        reply_to_message_id=message.id
-    )
-    return
-
-
-# help command
-@Client.on_message(filters.command(["help"]))
-async def send_help(client: Client, message: Message):
-    await client.send_message(
-        chat_id=message.chat.id, 
-        text=f"{HELP_TXT}"
-    )
-
-# cancel command
-@Client.on_message(filters.command(["cancel"]))
-async def send_cancel(client: Client, message: Message):
-    batch_temp.IS_BATCH[message.from_user.id] = True
-    await client.send_message(
-        chat_id=message.chat.id, 
-        text="**Batch Successfully Cancelled.**"
-    )
-
-@Client.on_message(filters.text & filters.private)
-async def save(client: Client, message: Message):
-    if "https://t.me/" in message.text:
-        if batch_temp.IS_BATCH.get(message.from_user.id) == False:
-            return await message.reply_text("**One Task Is Already Processing. Wait For Complete It. If You Want To Cancel This Task Then Use - /cancel**")
-        datas = message.text.split("/")
-        temp = datas[-1].replace("?single","").split("-")
-        fromID = int(temp[0].strip())
-        try:
-            toID = int(temp[1].strip())
-        except:
-            toID = fromID
-        batch_temp.IS_BATCH[message.from_user.id] = False
-        for msgid in range(fromID, toID+1):
-            if batch_temp.IS_BATCH.get(message.from_user.id): break
-            user_data = await db.get_session(message.from_user.id)
-            if user_data is None:
-                await message.reply("**For Downloading Restricted Content You Have To /login First.**")
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return
-            try:
-                acc = Client("saverestricted", session_string=user_data, api_hash=API_HASH, api_id=API_ID)
-                await acc.connect()
-            except:
-                batch_temp.IS_BATCH[message.from_user.id] = True
-                return await message.reply("**Your Login Session Expired. So /logout First Then Login Again By - /login**")
-            
-            # private
-            if "https://t.me/c/" in message.text:
-                chatid = int("-100" + datas[4])
-                try:
-                    await handle_private(client, acc, message, chatid, msgid)
-                except Exception as e:
-                    if ERROR_MESSAGE == True:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+    chat_id = message.from_user.id
+    args = message.text.split()
     
-            # bot
-            elif "https://t.me/b/" in message.text:
-                username = datas[4]
-                try:
-                    await handle_private(client, acc, message, username, msgid)
-                except Exception as e:
-                    if ERROR_MESSAGE == True:
-                        await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
-            
-            # public
-            else:
-                username = datas[3]
+    # Handle verification callback from shrinkme URL
+    if len(args) > 1 and args[1].startswith("add_premium_"):
+        parts = args[1].split("_")
+        if len(parts) == 5:
+            _, _, uid, code, status = parts
+            if str(chat_id) == uid and status == "freemium":
+                # Validate code
+                db_code = await db.get_user_code(chat_id)
+                if db_code == code:
+                    await db.add_freemium_user(chat_id, code, FREEMIUM_DURATION)
+                    
+                    # Advanced success animation
+                    loading_msg = await message.reply("🔄 **Processing verification...**", parse_mode=enums.ParseMode.MARKDOWN)
+                    await asyncio.sleep(1)
+                    
+                    success_text = """
+🎉 **VERIFICATION SUCCESSFUL!** 🎉
 
-                try:
-                    msg = await client.get_messages(username, msgid)
-                except UsernameNotOccupied: 
-                    await client.send_message(message.chat.id, "The username is not occupied by anyone", reply_to_message_id=message.id)
+✅ **Freemium Access Activated**
+⏰ **Duration:** 24 Hours  
+📊 **Your Limits:**
+   • 📁 Max 3 files per batch
+   • 🔢 4 batches daily (12 posts/day)
+   • 💾 Save any restricted content
+
+🚀 **Bot is ready to use!**
+Send any Telegram link to start saving content.
+
+💎 **Want unlimited access?** Check /plan
+                    """
+                    
+                    buttons = [
+                        [InlineKeyboardButton("📊 Check My Plan", callback_data="my_plan_btn")],
+                        [InlineKeyboardButton("📈 Upgrade Plan", callback_data="plans_btn")],
+                        [InlineKeyboardButton("❓ How to Use", callback_data="help_btn")]
+                    ]
+                    
+                    await loading_msg.edit_text(success_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=enums.ParseMode.MARKDOWN)
                     return
-                try:
-                    await client.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                except:
-                    try:    
-                        await handle_private(client, acc, message, username, msgid)               
-                    except Exception as e:
-                        if ERROR_MESSAGE == True:
-                            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id)
+                else:
+                    await message.reply("❌ **Invalid or expired verification code.**
 
-            # wait time
-            await asyncio.sleep(3)
-        batch_temp.IS_BATCH[message.from_user.id] = True
+Get a new verification link with /verify", parse_mode=enums.ParseMode.MARKDOWN)
+                    return
 
-
-# handle private
-async def handle_private(client: Client, acc, message: Message, chatid: int, msgid: int):
-    msg: Message = await acc.get_messages(chatid, msgid)
-    if msg.empty: return 
-    msg_type = get_message_type(msg)
-    if not msg_type: return 
-    chat = message.chat.id
-    if batch_temp.IS_BATCH.get(message.from_user.id): return 
-    if "Text" == msg_type:
-        try:
-            await client.send_message(chat, msg.text, entities=msg.entities, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-            return 
-        except Exception as e:
-            if ERROR_MESSAGE == True:
-                await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML)
-            return 
-
-    smsg = await client.send_message(message.chat.id, '**Downloading**', reply_to_message_id=message.id)
-    asyncio.create_task(downstatus(client, f'{message.id}downstatus.txt', smsg, chat))
-    try:
-        file = await acc.download_media(msg, progress=progress, progress_args=[message,"down"])
-        os.remove(f'{message.id}downstatus.txt')
-    except Exception as e:
-        if ERROR_MESSAGE == True:
-            await client.send_message(message.chat.id, f"Error: {e}", reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML) 
-        return await smsg.delete()
-    if batch_temp.IS_BATCH.get(message.from_user.id): return 
-    asyncio.create_task(upstatus(client, f'{message.id}upstatus.txt', smsg, chat))
-
-    if msg.caption:
-        caption = msg.caption
+    # Add user to database if not exists
+    if not await db.is_user_exist(chat_id):
+        await db.add_user(chat_id, message.from_user.first_name)
+        welcome_new_user = True
     else:
-        caption = None
-    if batch_temp.IS_BATCH.get(message.from_user.id): return 
-            
-    if "Document" == msg_type:
-        try:
-            ph_path = await acc.download_media(msg.document.thumbs[0].file_id)
-        except:
-            ph_path = None
+        welcome_new_user = False
+
+    # Check user role
+    role = await db.get_user_role(chat_id)
+    
+    if role == "free":
+        if welcome_new_user:
+            welcome_text = f"""
+🤖 **WELCOME TO PLAY-Z SAVER BOT!** 
+
+🎉 **Hi {message.from_user.first_name}!** Thanks for joining!
+
+🔥 **What this bot can do:**
+   • 💾 Save restricted Telegram content
+   • 📱 Forward from private channels  
+   • 🎥 Download videos, photos, documents
+   • 🔄 Batch processing support
+
+🔒 **To get started, you need to verify first:**
+
+🎁 **After verification you'll get:**
+   • 🆓 24 hours freemium access
+   • 📁 3 files per batch
+   • 🔢 4 batches daily (12 posts/day)
+
+⚡ **Ready to unlock the bot?**
+            """
+        else:
+            welcome_text = f"""
+🤖 **PLAY-Z RESTRICTED SAVER BOT**
+
+👋 **Welcome back {message.from_user.first_name}!**
+
+🔒 **Account Status:** Verification Required
+
+🎯 **Missing Features:**
+   • Save restricted content
+   • Forwarh_path = None
         
         try:
             await client.send_document(chat, file, thumb=ph_path, caption=caption, reply_to_message_id=message.id, parse_mode=enums.ParseMode.HTML, progress=progress, progress_args=[message,"up"])
