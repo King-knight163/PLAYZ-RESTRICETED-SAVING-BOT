@@ -31,13 +31,14 @@ class Bot(Client):
             await self.start()
         except Exception as e:
             print(f'❌ Error starting bot: {e}')
+            raise e
 
     async def stop(self, *args):
         await super().stop()
         print('🛑 Bot Stopped - Bye!')
 
-# Add this for standalone running
 if __name__ == "__main__":
+    print("🤖 Running bot directly...")
     Bot().run()
 
 # Don't Remove Credit Tg - @VJ_Botz
